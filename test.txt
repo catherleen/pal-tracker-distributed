@@ -952,3 +952,237 @@ Extra
 If you have additional time, add an endpoint that shows the 5 most recently created stories (with tests, of course). Next, make the number of stories that this endpoint returns configurable, and use the RefreshScope annotation to enable live reloading of this property. Deploy your application again and try changing your configuration without restarting your application.
 
 
+
+Purpose
+
+In this lab we will use Travis CI to deploy a system of four applications to Pivotal Cloud Foundry.
+Learning Outcomes
+
+After completing the lab, you will be able to:
+
+    Outline the reasons to keep the source code for multiple applications under one repo
+    Explain the directory structure and dependencies defined in the build.gradle files
+    Describe how to run multiple applications locally
+    Use cURL to manually test API endpoints
+    Explain how to configure CI to test and deploy multiple applications
+    Outline the reasons to deploy all the applications at the same time
+
+Discussion points
+
+    Walk through system
+    Walk through new distributed build in travis.yml
+    Compare to app continuum
+
+Get started
+
+The pal-tracker-distributed codebase contains the starting points and the solutions for all the labs in this unit. Download the linked zip file and extract the codebase in the ~/workspace directory. Take some time to navigate through the tags and branches using the following command:
+
+git log --graph --decorate --oneline --all
+
+You will see start and solution tags for each of the coming labs.
+
+Create a repository called pal-tracker-distributed in your GitHub account. Add this repository as a remote called origin of your local repository. You will push all of your work to this repository during the next few labs.
+
+We will start by pushing the initial commit to GitHub, complete with the start and solutions tags.
+
+git push origin master --tags
+
+We can then navigate to GitHub and view the solution tags. This is handy when you get stuck during a lab and need a little help. Use GitHub's compare functionality to compare your code to the solution.
+Set up CF services
+
+We will now create databases for our applications. We create them now because the MySQL service instances take time to provision.
+
+Create a MySQL service instance for each application. Call them tracker-allocations-database, tracker-backlog-database, tracker-registration-database and tracker-timesheets-database.
+Explore the codebase
+
+Open the code in IntelliJ and take a look around. Make sure that Java 11 is set as the Gradle JVM and the Project SDK (File -> Project Structure).
+
+Pay special attention to the directory structure of our codebase.
+
+.
+├── applications
+│   ├── allocations-server
+│   ├── backlog-server
+│   ├── registration-server
+│   └── timesheets-server
+├── components
+│   ├── accounts
+│   ├── allocations
+│   ├── backlog
+│   ├── projects
+│   ├── rest-support
+│   ├── test-support
+│   ├── timesheets
+│   └── users
+├── databases
+│   ├── allocations-database
+│   ├── backlog-database
+│   ├── registration-database
+│   └── timesheets-database
+├── integration-test
+└── buildSrc
+
+    The applications directory contains our Spring Boot applications.
+    The components directory contains components of our domains and support libraries.
+    The databases directory contains migration information for our different schemas.
+    The buildSrc directory is a standard gradle directory that gets built before the rest of the build is loaded. This is where we store the code for our custom gradle plugins.
+
+Jar dependencies
+
+There is a gradle plugin in our buildSrc directory that will allow us to see the dependencies between our applications and components.
+
+Invoke this plugin by invoking the dependenciesGraph Gradle task, then view the dependency graph at build/dependenciesGraph/graph.dot.png.
+
+Note that this graph shows dependencies between jars, not applications.
+Explore locally
+Build
+
+First, make sure that you can test and build the project locally. Create the databases, migrate, then run the build.
+
+mysql -uroot < databases/create_databases.sql
+./gradlew devMigrate testMigrate
+./gradlew clean build
+
+It is important to check that the code is working on your machine before each of the labs, so remember to run the build before each lab.
+Run
+
+Next, make sure that you can run the project locally.
+
+You can run each application individually in a separate terminal window by targeting the bootRun task for a specific Gradle subproject. For example, you can run the registration service with the following command:
+
+./gradlew applications:registration-server:bootRun
+
+Managing many terminal windows can be cumbersome, so we can use Gradle's parallel execution feature to make things a bit easier. The following command finds all bootRun tasks in a gradle project and executes them in parallel.
+
+./gradlew bootRun --parallel
+
+Beware that running all applications in parallel will dump the log output of all applications to the same terminal, which can make debugging difficult. Also, pressing Ctrl-C will kill all applications at once. If you need to stop one application you can use the JVM Project Status tool to list Java processes by running
+
+jps -l
+
+Kill the desired application by targeting its PID.
+Exercise endpoints
+
+Exercise the curl commands below to make sure that you understand the system. Keep these commands handy, as they will be useful to test your system in future labs.
+
+Users
+
+curl -i -XPOST -H"Content-Type: application/json" localhost:8083/registration -d'{"name": "Pete"}'
+curl -i localhost:8083/users/${USER_ID}
+
+Accounts
+
+curl -i localhost:8083/accounts?ownerId=${USER_ID}
+
+Projects
+
+curl -i -XPOST -H"Content-Type: application/json" localhost:8083/projects -d"{\"name\": \"Basket Weaving\", \"accountId\": ${ACCOUNT_ID}}"
+curl -i localhost:8083/projects?accountId=${ACCOUNT_ID}
+
+Allocations
+
+curl -i -XPOST -H"Content-Type: application/json" localhost:8081/allocations -d"{\"projectId\": ${PROJECT_ID}, \"userId\": ${USER_ID}, \"firstDay\": \"2015-05-17\", \"lastDay\": \"2015-05-18\"}"
+curl -i localhost:8081/allocations?projectId=${PROJECT_ID}
+
+Stories
+
+curl -i -XPOST -H"Content-Type: application/json" localhost:8082/stories -d"{\"projectId\": ${PROJECT_ID}, \"name\": \"Find some reeds\"}"
+curl -i localhost:8082/stories?projectId=${PROJECT_ID}
+
+Time Entries
+
+curl -i -XPOST -H"Content-Type: application/json" localhost:8084/time-entries/ -d"{\"projectId\": ${PROJECT_ID}, \"userId\": ${USER_ID}, \"date\": \"2015-05-17\", \"hours\": 6}"
+curl -i localhost:8084/time-entries?userId=${USER_ID}
+
+Set up Travis CI
+
+Our new .travis.yml file configures the pipeline to build all four applications and deploy them to Cloud Foundry on success. The pipeline is configured to pull down the code whenever we push to GitHub. To enable this we must connect Travis CI to our GitHub repository.
+
+    Activate your pal-tracker-distributed repository on your Travis CI profile. You may have to click sync account for Travis to pick up the repository.
+
+    In the settings section of your Travis CI pal-tracker-distributed page, add environment variables for your CF_API_URL, CF_ORG, CF_SPACE, CF_USERNAME, CF_PASSWORD, and GITHUB_USERNAME.
+
+    Create a GitHub Oauth Token. Configure the token with repo access when you create it. Copy this value and add it to your environment variables with a GITHUB_OAUTH_TOKEN in your pipeline on Travis CI.
+
+Confirm CF service creation
+
+Confirm that all of the MySQL instances you created earlier have been fully provisioned using the cf services or cf service command. The instances will be bound via an entry in the manifest.
+Choose routes
+
+The root directory contains a deployment manifest for each application in our distributed system. Familiarize yourself with a manifest, below.
+Hide manifest-allocations.yml
+pal-tracker-distributed/manifest-allocations.yml
+
+applications:
+- name: tracker-allocations
+  path: ./applications/allocations-server/build/libs/allocations-server.jar
+  routes:
+  - route: allocations-pal-{UNIQUE_IDENTIFIER}.apps.chicken.pal.pivotal.io
+  memory: 1G
+  instances: 1
+  env:
+    REGISTRATION_SERVER_ENDPOINT: http://FILL_ME_IN
+    JBP_CONFIG_OPEN_JDK_JRE: '{ jre: { version: 11.+ } }'
+  services:
+  - tracker-allocations-database
+
+Each application needs a unique route so that it does not collide with other students' applications.
+
+    Change the route value in each manifest to make it unique following this guide.
+
+    Once you have chosen routes, update the value for REGISTRATION_SERVER_ENDPOINT in each manifest. For example:
+
+    https://{REGISTRATION_SERVER_NAME}.apps.chicken.pal.pivotal.io
+
+    Commit your changes and push them to Github.
+
+    This will trigger a build on Travis CI. We expect the build and deploy to succeed this time.
+
+    For each application, visit its root page on PCF and test manually. Each one should display Noop!.
+
+    Manually trigger a few requests to the various controllers to verify that the applications are working as expected.
+
+    The allocations, backlog, and timesheets applications all integrate with the registration application, so make sure to exercise API endpoints that integrate with registration.
+
+Assignment
+
+Submit the assignment using the cloudNativeDeveloperDistributedSystemDeployment gradle task. Provide URLs of all your applications as command line arguments. For example:
+
+cd ~/workspace/assignment-submission
+./gradlew cloudNativeDeveloperDistributedSystemDeployment \
+    -PregistrationServerUrl=https://${REGISTRATION_APP_URL} \
+    -PbacklogServerUrl=https://${BACKLOG_APP_URL} \
+    -PallocationsServerUrl=https://${ALLOCATIONS_APP_URL} \
+    -PtimesheetsServerUrl=https://${TIMESHEETS_APP_URL}
+
+Learning Outcomes
+
+Now that you have completed the lab, you should be able to:
+
+    Outline the reasons to keep the source code for multiple applications under one repo
+    Explain the directory structure and dependencies defined in the build.gradle files
+    Describe how to run multiple applications locally
+    Use cURL to manually test API endpoints
+    Explain how to configure CI to test and deploy multiple applications
+    Outline the reasons to deploy all the applications at the same time
+
+Extra
+
+If you have additional time, run a few requests that will test the limits of your distributed system.
+
+In a Bash shell you can use the siege command to generate many requests. First, generate some data with the curl commands in the run section. Next, create a urls.txt file with the following content:
+
+https://registration-pal-{UNIQUE_IDENTIFIER}.{DOMAIN}/users/{USER_ID}
+https://registration-pal-{UNIQUE_IDENTIFIER}.{DOMAIN}/accounts?ownerId={USER_ID}
+https://registration-pal-{UNIQUE_IDENTIFIER}.{DOMAIN}/projects?accountId={ACCOUNT_ID}
+https://allocations-pal-{UNIQUE_IDENTIFIER}.{DOMAIN}/allocations?projectId={PROJECT_ID}
+https://backlog-pal-{UNIQUE_IDENTIFIER}.{DOMAIN}/stories?projectId={PROJECT_ID}
+https://timesheets-pal-{UNIQUE_IDENTIFIER}.{DOMAIN}/time-entries?userId={USER_ID}
+
+Run the following command to generate lots of traffic:
+
+siege -c255 -f urls.txt
+
+Play around with stopping, scaling, and starting your applications to see what effect these actions have on your generated traffic and response times.
+
+
