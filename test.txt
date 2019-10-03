@@ -1,0 +1,409 @@
+
+Purpose
+
+During this lab we will add OAuth security for service-to-service communication in our applications.
+
+In order to achieve this, we are going to set up each application as a resource server requiring OAuth. For the applications that integrate with the registration server we will provide them with a RestTemplate that has built-in support for OAuth.
+
+We will run OAuth locally, but we need to be able to disable it for easier integration testing. On PCF, we will leverage the identity service and the Spring Cloud SSO connector to automate its integration.
+Learning Outcomes
+
+After completing the lab, you will be able to:
+
+    Outline the steps of OAuth authorization
+    Recall that Cloud Foundry UAA can be used as an OAuth2 provider
+    Describe how to secure service-to-service communication using Spring Security and OAuth
+    Describe how to configure a SSO service on Cloud Foundry
+
+Discussion points
+
+    OAuth basics (authorization code flow diagram, client credentials flow diagram)
+    Cloud Foundry UAA (User Account and Authentication)
+
+Create SSO service in Cloud Foundry
+
+    Create an SSO service instance and call it tracker-sso. This service instance may get created instantly but we create it here for consistency across the labs.
+
+    If you do not see the SSO service in the Cloud Foundry marketplace, you may need to request access to it.
+
+Add dependencies
+
+Start by adding the right dependencies for Spring Security and OAuth2.
+
+    Add the Spring Cloud SSO Version to your build.gradle in the ext block:
+
+    springSecurityOAuthAutoconfigVersion = "2.1.0.RELEASE"
+    springCloudSsoVersion = "2.1.3.RELEASE"
+
+    Add the following dependencies to server.gradle:
+
+    compile "org.springframework.security.oauth.boot:spring-security-oauth2-autoconfigure:$springSecurityOAuthAutoconfigVersion"
+    compile "io.pivotal.spring.cloud:spring-cloud-sso-connector:$springCloudSsoVersion"
+
+    The spring-cloud-sso-connector dependency will automate configuration of the application when bound to an identity service on PCF. The spring-security-oauth2-autoconfigure dependency allows Spring Boot 2 to continue to use older style OAuth2 configuration. See this article for details.
+
+Configure Resource Server
+
+You will configure your servers as Spring Security Resource Servers, which will allow them to authenticate all calls with OAuth and to return a 4xx response for unauthenticated requests.
+
+The following steps need to happen for the Allocations Server, Backlog Server, Registration Server, and Timesheets Server.
+
+    Annotate the App class in with @EnableResourceServer, @EnableWebSecurity and @EnableOAuth2Client.
+
+    + @EnableWebSecurity
+    + @EnableResourceServer
+    + @EnableOAuth2Client
+    @EnableCircuitBreaker
+    @EnableEurekaClient
+    @SpringBootApplication
+
+    Create an OauthResourceServerConfig class in the same package as the App class.
+
+    Each of these applications will need an OAuth-configured RestTemplate, so the OauthResourceServerConfig looks like the following:
+    Hide OauthResourceServerConfig.java
+    pal-tracker-distributed/applications/backlog-server/src/main/java/io/pivotal/pal/tracker/backlog/OauthResourceServerConfig.java
+
+    package io.pivotal.pal.tracker.backlog;
+
+    import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+    import org.springframework.cloud.client.loadbalancer.LoadBalanced;
+    import org.springframework.context.annotation.Bean;
+    import org.springframework.context.annotation.Configuration;
+    import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+    import org.springframework.security.oauth2.client.OAuth2ClientContext;
+    import org.springframework.security.oauth2.client.OAuth2RestTemplate;
+    import org.springframework.security.oauth2.client.resource.OAuth2ProtectedResourceDetails;
+    import org.springframework.security.oauth2.config.annotation.web.configuration.ResourceServerConfigurerAdapter;
+    import org.springframework.security.oauth2.config.annotation.web.configurers.ResourceServerSecurityConfigurer;
+    import org.springframework.web.client.RestOperations;
+
+    @Configuration
+    @ConditionalOnProperty(value = "application.oauth-enabled", matchIfMissing = true)
+    public class OauthResourceServerConfig extends ResourceServerConfigurerAdapter {
+
+        @Bean
+        @LoadBalanced
+        public RestOperations restTemplate(OAuth2ProtectedResourceDetails resource, OAuth2ClientContext oauth2ClientContext) {
+            return new OAuth2RestTemplate(resource, oauth2ClientContext);
+        }
+
+        @Override
+        public void configure(HttpSecurity http) throws Exception {
+            // enforce authentication on our API endpoints.
+            http.authorizeRequests().anyRequest().authenticated();
+        }
+
+        @Override
+        public void configure(ResourceServerSecurityConfigurer resources) throws Exception {
+            // do not require a resource id in AccessToken.
+            resources.resourceId(null);
+        }
+    }
+
+    Update application.properties with the following configuration information.
+
+    + security.oauth2.resource.token-info-uri=http://localhost:8999/oauth/check_token
+    + management.endpoints.web.exposure.include=env,health
+
+    The first configuration provides the URI of the OAuth Authorization Server.
+
+    The second configuration allows the listed Actuator endpoints to be exposed. Please Note: You should take care when exposing Actuator endpoints. See this article for more details.
+
+    Delete the SecurityConfiguration class because it is no longer needed. The above configuration classes cover the cases of where we want security for our application.
+
+Configure RestTemplate for OAuth
+
+Our applications communicate over HTTP, so the RestTemplate configurations must be updated to support OAuth.
+
+    Remove the RestOperations bean from the RestConfig class since it is now configured in each application configuration.
+
+    Add the following lines to application.properties file for the allocations, backlog and timesheets servers.
+
+    security.oauth2.client.access-token-uri=http://localhost:8999/oauth/token
+    security.oauth2.client.grant-type=client_credentials
+
+    To avoid committing the client id and the client secret with our properties file, we will set them later using environment variables.
+
+These changes allow each application to authenticate with our OAuth provider. The registration server does not need any of this new configuration as it does not make HTTP calls to other servers.
+Disabling OAuth for tests
+
+Our flow test does not take OAuth into account. We could spin up an actual OAuth server and change our test to integrate with it, but it does not seem worth the effort. Also, we may want to run our local server with or without OAuth. Next we will make sure we can disable the OAuth configuration when necessary.
+Update the applications
+
+The following steps need to happen for the Allocations Server, Backlog Server, Registration Server, and Timesheets Server.
+
+    Add the following line in test/resources/application.properties to disable OAuth:
+
+    application.oauth-enabled=false
+
+    Take a look at the OauthResourceServerConfig. The @ConditionalOnProperty(value = "application.oauth-enabled", matchIfMissing = true) annotation will tell Spring to only load this config when application.oauth-enabled is either set to true or is not set.
+
+    Create another config in the same package. Name it NoOauthResourceServerConfig.
+    Hide NoOauthResourceServerConfig.java
+    pal-tracker-distributed/applications/backlog-server/src/main/java/io/pivotal/pal/tracker/backlog/NoOauthResourceServerConfig.java
+
+    package io.pivotal.pal.tracker.backlog;
+
+    import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+    import org.springframework.cloud.client.loadbalancer.LoadBalanced;
+    import org.springframework.context.annotation.Bean;
+    import org.springframework.context.annotation.Configuration;
+    import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+    import org.springframework.security.oauth2.config.annotation.web.configuration.ResourceServerConfigurerAdapter;
+    import org.springframework.web.client.RestOperations;
+    import org.springframework.web.client.RestTemplate;
+
+    @Configuration
+    @ConditionalOnProperty(value = "application.oauth-enabled", havingValue = "false")
+    public class NoOauthResourceServerConfig extends ResourceServerConfigurerAdapter {
+
+        @Override
+        public void configure(HttpSecurity http) throws Exception {
+            http.authorizeRequests().anyRequest().permitAll();
+        }
+
+        @Bean
+        @LoadBalanced
+        public RestOperations restOperations() {
+            return new RestTemplate();
+        }
+    }
+
+    This creates a config that is loaded when application.oauth-enabled is set to false through application.properties or through an environment variable.
+
+    The NoOauthResourceServerConfig class can be a bit simpler for your Registration Server, again because it does not make HTTP calls to other servers:
+    Hide NoOauthResourceServerConfig.java
+    pal-tracker-distributed/applications/registration-server/src/main/java/io/pivotal/pal/tracker/registration/NoOauthResourceServerConfig.java
+
+    package io.pivotal.pal.tracker.registration;
+
+    import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+    import org.springframework.context.annotation.Configuration;
+    import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+    import org.springframework.security.oauth2.config.annotation.web.configuration.ResourceServerConfigurerAdapter;
+
+    @Configuration
+    @ConditionalOnProperty(value = "application.oauth-enabled", havingValue = "false")
+    public class NoOauthResourceServerConfig extends ResourceServerConfigurerAdapter {
+
+        @Override
+        public void configure(HttpSecurity http) throws Exception {
+            http.authorizeRequests().anyRequest().permitAll();
+        }
+    }
+
+Update the flow test
+
+    Edit the ApplicationServer class, change the startWithDatabaseName function and add to the environment:
+
+    .put("APPLICATION_OAUTH_ENABLED", "false")
+
+    Verify that the build is still working.
+
+    ./gradlew clean build
+
+    If the build is not working at this point, take the time to fix it before moving on.
+
+Run locally
+
+To make running your application locally easier, create a simple OAuth server that you can use locally.
+
+    Create a platform-services/oauth-server directory containing a build.gradle file with the following content:
+    Hide build.gradle
+    pal-tracker-distributed/platform-services/oauth-server/build.gradle
+
+    apply plugin: "org.springframework.boot"
+    apply plugin: "io.spring.dependency-management"
+
+    dependencies {
+        compile "org.springframework.boot:spring-boot-starter-web"
+        compile "org.springframework.security.oauth.boot:spring-security-oauth2-autoconfigure:$springSecurityOAuthAutoconfigVersion"
+    }
+
+    Add the platform-services:oauth-server project to the settings.gradle file.
+
+    Create a class io.pivotal.pal.tracker.oauthserver.App with the following content
+    Hide App.java
+    pal-tracker-distributed/platform-services/oauth-server/src/main/java/io/pivotal/pal/tracker/oauthserver/App.java
+
+    package io.pivotal.pal.tracker.oauthserver;
+
+    import org.springframework.boot.SpringApplication;
+    import org.springframework.boot.autoconfigure.SpringBootApplication;
+    import org.springframework.security.oauth2.config.annotation.web.configuration.AuthorizationServerConfigurerAdapter;
+
+    @SpringBootApplication
+    public class App extends AuthorizationServerConfigurerAdapter {
+
+        public static void main(String[] args) {
+            SpringApplication.run(App.class, args);
+        }
+    }
+
+    Create a class io.pivotal.pal.tracker.oauthserver.SecurityConfig with the following content
+    Hide SecurityConfig.java
+    pal-tracker-distributed/platform-services/oauth-server/src/main/java/io/pivotal/pal/tracker/oauthserver/SecurityConfig.java
+
+    package io.pivotal.pal.tracker.oauthserver;
+
+    import org.springframework.context.annotation.Configuration;
+    import org.springframework.security.crypto.password.NoOpPasswordEncoder;
+    import org.springframework.security.oauth2.config.annotation.configurers.ClientDetailsServiceConfigurer;
+    import org.springframework.security.oauth2.config.annotation.web.configuration.AuthorizationServerConfigurerAdapter;
+    import org.springframework.security.oauth2.config.annotation.web.configuration.EnableAuthorizationServer;
+    import org.springframework.security.oauth2.config.annotation.web.configurers.AuthorizationServerSecurityConfigurer;
+
+    @Configuration
+    @EnableAuthorizationServer
+    public class SecurityConfig extends AuthorizationServerConfigurerAdapter {
+
+        @Override
+        public void configure(ClientDetailsServiceConfigurer clients) throws Exception {
+            clients.inMemory()
+                .withClient("tracker-client")
+                .secret("supersecret")
+                .authorizedGrantTypes("client_credentials")
+                .scopes("openid");
+        }
+
+        @Override
+        @SuppressWarnings("deprecation")
+        public void configure(AuthorizationServerSecurityConfigurer oauthServer)
+            throws Exception {
+            oauthServer
+                // NoOpPasswordEncoder is not secure but will be OK for local testing purposes.
+                .passwordEncoder(NoOpPasswordEncoder.getInstance())
+                .tokenKeyAccess("permitAll()")
+                .checkTokenAccess("isAuthenticated()");
+        }
+    }
+
+    Configure the OAuth server to run on port 8999 and set the spring.application.name to oauth-server in the application.properties file.
+
+    Add the following to the end of your server.gradle file:
+
+    bootRun.environment([
+        "APPLICATION_OAUTH_ENABLED": true,
+        "SECURITY_OAUTH2_CLIENT_CLIENT_ID": "tracker-client",
+        "SECURITY_OAUTH2_CLIENT_CLIENT_SECRET": "supersecret"
+    ])
+
+        The APPLICATION_OAUTH_ENABLED variable enables OAuth locally.
+        The SECURITY_OAUTH2_CLIENT_CLIENT_ID and SECURITY_OAUTH2_CLIENT_CLIENT_SECRET variables set the client credentials for your connected applications.
+
+    Run the servers.
+
+    ./gradlew bootRun --parallel
+
+    Generate an Access token using the auth server running on localhost:8999.
+
+    curl 'http://localhost:8999/oauth/token' -i -u 'tracker-client:supersecret' -X POST -H 'Accept: application/json' -H 'Content-Type: application/x-www-form-urlencoded' -d 'grant_type=client_credentials&response_type=token&token_format=opaque'
+
+    We are asking for a Client Credentials Grant, using basic auth. You can find the documentation on the UAA Reference documentation.
+
+    Once you have a token, query your applications by providing the token in the authorization header.
+
+    curl localhost:8083 -H"Authorization: Bearer ${YOUR_TOKEN}"
+
+    Ensure you have everything working as expected locally before moving on. Test API endpoints that integrate with the Registration Server to make sure the configuration is working.
+
+    Try to access the actuator endpoints you exposed on your applications. For example, try to curl http://localhost:8081/actuator/env. Is it protected by OAuth?
+
+Configure SSO in Cloud Foundry
+
+    Confirm that your SSO service creation is completed.
+
+    Edit your manifest.yml files to integrate with the SSO service. For each application:
+
+        Set the GRANT_TYPE environment variable to client_credentials.
+
+        Bind the application to the service instance.
+
+    For example, our backlog manifest looks like:
+    Hide manifest-backlog.yml
+    pal-tracker-distributed/manifest-backlog.yml
+
+    applications:
+    - name: tracker-backlog
+      path: ./applications/backlog-server/build/libs/backlog-server.jar
+      routes:
+      - route: backlog-pal-{UNIQUE_IDENTIFIER}.apps.chicken.pal.pivotal.io
+      memory: 1G
+      instances: 1
+      env:
+        JBP_CONFIG_OPEN_JDK_JRE: '{ jre: { version: 11.+ } }'
+        GRANT_TYPE: client_credentials
+      services:
+      - tracker-backlog-database
+      - tracker-service-registry
+      - tracker-circuit-breaker-dashboard
+      - tracker-sso
+
+    Push your code changes to your GitHub and Travis CI will deploy.
+
+Test everything is working
+
+    Look at the environment for tracker-allocations to get your UAA endpoint, client id, and client secret.
+
+    cf env tracker-allocations
+
+    // ..
+    "sso-service-name": [
+       {
+        "credentials": {
+         "auth_domain": "UAA_ENDPOINT",
+         "client_id": "UAA_CLIENT_ID",
+         "client_secret": "UAA_CLIENT_SECRET"
+        },
+        "name": "tracker-sso",
+        "instance-name": "tracker-sso",
+        // ..
+       }
+      ]
+    // ..
+
+    Obtain an access token from the UAA server
+
+    curl -k "${UAA_ENDPOINT}/oauth/token" -i -u "${UAA_CLIENT_ID}:${UAA_CLIENT_SECRET}" -X POST -H 'Accept: application/json' -H 'Content-Type: application/x-www-form-urlencoded' -d 'grant_type=client_credentials&response_type=token'
+
+    {
+       "access_token": "SOME_VERY_LONG_TOKEN",
+       "token_type": "bearer",
+       "expires_in": 43199,
+       "scope":"uaa.resource",
+       "jti":"cb94c15dc6a0438d849168c18996a1ce"
+    }
+
+    Use the above access token to make some test calls to your application.
+
+Assignment
+
+Submit the following assignment:
+
+cd ~/workspace/assignment-submission
+./gradlew cloudNativeDeveloperDistributedSystemWithSecurity \
+    -PuaaUrl=${UAA_ENDPOINT} \
+    -PclientId=${UAA_CLIENT_ID} \
+    -PclientSecret=${UAA_CLIENT_SECRET} \
+    -PregistrationServerUrl=https://${REGISTRATION_APP_URL} \
+    -PbacklogServerUrl=https://${BACKLOG_APP_URL} \
+    -PallocationsServerUrl=https://${ALLOCATIONS_APP_URL} \
+    -PtimesheetsServerUrl=https://${TIMESHEETS_APP_URL}
+
+Wrap up
+
+    ResourceServer and OAuth2RestTemplate
+    Dangers of disabling security for tests
+
+Learning Outcomes
+
+Now that you have completed the lab, you should be able to:
+
+    Outline the steps of OAuth authorization
+    Recall that Cloud Foundry UAA can be used as an OAuth2 provider
+    Describe how to secure service-to-service communication using Spring Security and OAuth
+    Describe how to configure a SSO service on Cloud Foundry
+
+Extra
+
+If you have additional time, try adding a UI that talks to one of your applications. You may want to read up on OAuth grant types.
