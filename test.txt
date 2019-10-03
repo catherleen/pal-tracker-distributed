@@ -407,3 +407,548 @@ Now that you have completed the lab, you should be able to:
 Extra
 
 If you have additional time, try adding a UI that talks to one of your applications. You may want to read up on OAuth grant types.
+
+
+
+
+
+
+Purpose
+
+In this lab we will enable our applications to register themselves with a Eureka service registry on PCF.
+
+At the end of the lab, each application will be able to discover microservices by name, reducing the configuration needed to deploy our system.
+Learning Outcomes
+
+After completing the lab, you will be able to:
+
+    Explain how to introduce Spring Cloud to an application running on Cloud Foundry
+    Describe the pros and cons of using Service Discovery
+    Describe the pros and cons of using Client Side Load Balancing
+    Explain how to add Service Discovery to an application
+    Explain how to add Client Side Load Balancing to an application
+    Identify the differences between routing through the GoRouter and container to container networking
+
+Discussion points
+
+    Spring cloud benefits and costs
+    io.pivotal vs org.springframework dependencies
+    Dependency chart
+    Service discovery basics (diagram)
+    Client side load balancing with Ribbon
+
+Create Eureka server for local use
+
+For the following labs we will run a local version of our Spring Cloud Services out of a platform-services directory. It is vital to ensure that you are running compatible versions of Spring Boot, Spring Cloud, and Spring Cloud Services. In order to pick compatible versions, we must understand the relationships between the different libraries.
+
+    Netflix OSS - tools written and open-sourced by Netflix to address the complexities of microservice development and deployment. These tools include Eureka, Ribbon, Hystrix, and many more.
+
+    Spring Cloud - the larger suite of microservice related projects with integrations for Spring Boot. Spring Cloud Netflix is a subset of Spring Cloud which leverages the Netflix OSS tools (Eureka, Ribbon, Hystrix, etc.), allowing you for example to create a Eureka server with a single annotation.
+
+    Spring Cloud Services (SCS) - Integrates Spring Cloud with Pivotal Cloud Foundry. SCS consists of:
+        a Pivotal Cloud Foundry SCS Tile, which allows among other things to provision SCS services from the marketplace
+        the SCS Client Libraries/Client Starters, which are the client libraries to be included in the application that will consume SCS services on PCF
+
+To find the proper versions of these dependencies for your foundation and application, use this guide.
+
+    In the top level build.gradle, add the following variables for Spring Cloud versions in the ext closure:
+
+    springCloudVersion = SPRING_CLOUD_VERSION
+    springCloudServicesClientLibrariesVersion = SPRING_CLOUD_SERVICES_CLIENT_LIBRARIES_VERSION
+
+    Create a platform-services/eureka-server directory containing a build.gradle file with the following contents:
+    Hide build.gradle
+    pal-tracker-distributed/platform-services/eureka-server/build.gradle
+
+    apply plugin: "org.springframework.boot"
+    apply plugin: "io.spring.dependency-management"
+
+    dependencyManagement {
+        imports {
+            mavenBom "org.springframework.cloud:spring-cloud-dependencies:$springCloudVersion"
+        }
+    }
+
+    dependencies {
+        compile "org.springframework.boot:spring-boot-starter-web"
+        compile "org.springframework.cloud:spring-cloud-starter-netflix-eureka-server"
+        // See https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-with-Java-9-and-above#jaxb
+        // for details about this dependency.
+        compile "org.glassfish.jaxb:jaxb-runtime:2.3.1"
+    }
+
+    Add the platform-services:eureka-server project to the settings.gradle file.
+
+    Create a io.pivotal.pal.tracker.eurekaserver.App class with the following content
+    Hide App.java
+    pal-tracker-distributed/platform-services/eureka-server/src/main/java/io/pivotal/pal/tracker/eurekaserver/App.java
+
+    package io.pivotal.pal.tracker.eurekaserver;
+
+    import org.springframework.boot.SpringApplication;
+    import org.springframework.boot.autoconfigure.SpringBootApplication;
+    import org.springframework.cloud.netflix.eureka.server.EnableEurekaServer;
+
+    @EnableEurekaServer
+    @SpringBootApplication
+    public class App {
+
+        public static void main(String[] args) {
+            SpringApplication.run(App.class, args);
+        }
+    }
+
+    Configure the eureka server to run on port 8761 in the application.properties file. Set the spring.application.name to eureka-server.
+
+    Run your eureka server with:
+
+    ./gradlew platform-services:eureka-server:bootRun
+
+    You may see some errors in the console output while the Eureka server boots. This is Eureka trying to replicate service registry information and does not affect the operation of the server.
+
+    Navigate to localhost:8761 to see your Eureka dashboard.
+
+Create Eureka server on Cloud Foundry
+
+Create the service registry service instance and call it tracker-service-registry. Creation of the service will take a few minutes so that is why we create it here and continue our work.
+Add Eureka to applications
+
+Now that we have Eureka running locally we are ready to configure our applications to use it.
+Update dependencies
+
+Spring Cloud uses the gradle dependency management plugin to manage versions between dependencies. Take a minute to read about the plugin if you have never seen it before.
+
+It is important to keep your versions of Spring Framework, Spring Boot, Spring Cloud, and Spring Cloud Services in sync. Use this guide to help pick the correct versions.
+
+    In applications/server.gradle, introduce the Spring Cloud dependencies management packages. Add the following after the last apply plugin: line:
+
+    apply plugin: "io.spring.dependency-management"
+
+    dependencyManagement {
+        imports {
+            mavenBom "io.pivotal.spring.cloud:spring-cloud-services-dependencies:$springCloudServicesClientLibrariesVersion"
+        }
+    }
+
+    These dependency management packages will make sure that the correct versions of Spring, Spring Boot, and SCS are installed.
+
+    Now add dependencies for Actuator and Service Registry in the dependencies closure.
+
+    compile "org.springframework.boot:spring-boot-starter-actuator"
+    compile "io.pivotal.spring.cloud:spring-cloud-services-starter-service-registry"
+
+    We do not need to include versions here since they will be managed by the Dependency Management plugin.
+
+Update configuration
+
+    The spring-cloud-services-starter-service-registry dependency pulls in a dependency on Spring Security and auto configures each application based on Spring Security defaults. This configuration makes it harder to focus on learning service discovery so we will disable this configuration only for examples. Do not use this configuration in a production environment.
+
+    Create a SecurityConfiguration class in each application with the following contents. In a production application, you would configure Spring Security to your specific situation.
+    Hide SecurityConfiguration.java
+    pal-tracker-distributed/applications/allocations-server/src/main/java/io/pivotal/pal/tracker/allocations/SecurityConfiguration.java
+
+    package io.pivotal.pal.tracker.allocations;
+
+    import org.springframework.context.annotation.Configuration;
+    import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+    import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+    import org.springframework.security.config.annotation.web.configuration.WebSecurityConfigurerAdapter;
+
+    @EnableWebSecurity
+    @Configuration
+    public class SecurityConfiguration extends WebSecurityConfigurerAdapter {
+
+        @Override
+        protected void configure(HttpSecurity http) throws Exception {
+            http
+                .authorizeRequests()
+                .anyRequest().permitAll()
+                .and()
+                .csrf().disable();
+        }
+
+    }
+
+    We will fetch the registration server address from Eureka, so we no longer need to specify an explicit host and port name. Instead, we use the name that the server registers with Eureka. This is taken from the 'spring.application.name' property.
+
+    Change the configuration in each of the application.properties files (in main and test) to read:
+
+    registration.server.endpoint=http://registration-server
+
+    Enable registration with our Eureka server by annotating App classes with @EnableEurekaClient. Do so for each application: allocations-server, backlog-server, registration-server, and timesheets-server.
+
+Update the RestOperations bean
+
+Now that we are using http://registration-server for our registration server address, we must update our RestOperations bean to correctly resolve that address. We will use a client-side load balancer called Ribbon to fetch the registration url from Eureka.
+
+    To use Ribbon in our rest support component we must include a dependency on org.springframework.cloud:spring-cloud-commons. It is important that the version of Spring Cloud Commons in rest support matches the version of Spring Cloud Commons that is already included by the Spring Cloud starters in each of our servers.
+
+    To find this version, use the Gradle dependencies command to list all compile dependencies for one of your applications. Find the version of org.springframework.cloud:spring-cloud-commons listed in this output.
+
+    Update the rest support build.gradle file with a compile dependency on the version of org.springframework.cloud:spring-cloud-commons that you found above.
+
+    Update the RestConfig to use Ribbon by adding the @LoadBalanced annotation to the RestOperations bean method.
+
+    Update the FlowTest to disable Eureka and to set Ribbon's REGISTRATION_SERVER_ENDPOINT manually. Change the ApplicationServer class.
+
+      public void startWithDatabaseName(String dbName) throws IOException, InterruptedException {
+          String dbUrl = "jdbc:mysql://localhost:3306/" + dbName + "?useSSL=false&useTimezone=true&serverTimezone=UTC&useLegacyDatetimeCode=false";
+
+          start(envMapBuilder()
+              .put("SPRING_DATASOURCE_URL", dbUrl)
+    +         .put("EUREKA_CLIENT_ENABLED", "false")
+    +         .put("RIBBON_EUREKA_ENABLED", "false")
+    +         .put("REGISTRATION_SERVER_RIBBON_LISTOFSERVERS", "http://localhost:8883")
+              .build()
+          );
+      }
+
+    Run the build to make sure everything compiles and that tests pass.
+
+Deploy
+
+Now deploy your applications to Cloud Foundry:
+
+    Confirm that your service registry instance has been created.
+
+    Update all four manifests to create the service binding.
+
+    services:
+    # ...
+    - tracker-service-registry
+
+    Remove the REGISTRATION_SERVER_ENDPOINT variable from each of the manifests.
+
+    Unset the REGISTRATION_SERVER_ENDPOINT environment variable from each application:
+
+    cf unset-env tracker-allocations REGISTRATION_SERVER_ENDPOINT
+    cf unset-env tracker-backlog REGISTRATION_SERVER_ENDPOINT
+    cf unset-env tracker-timesheets REGISTRATION_SERVER_ENDPOINT
+
+    Commit your changes and push your code to GitHub. Travis CI will trigger the build and deploy all four applications.
+
+    Verify that the applications are up and running by checking their /actuator/health endpoints. The health endpoints should list all four applications in services under discoveryClient, and in applications under eureka. You may need to refer to the health monitoring lab to remind yourself how to configure Actuator to expose full health details.
+
+Make sure the applications are working by exercising endpoints.
+Assignment
+
+Submit the following assignment:
+
+cd ~/workspace/assignment-submission
+./gradlew cloudNativeDeveloperDistributedSystemWithServiceDiscovery \
+    -PregistrationServerUrl=https://${REGISTRATION_APP_URL} \
+    -PbacklogServerUrl=https://${BACKLOG_APP_URL} \
+    -PallocationsServerUrl=https://${ALLOCATIONS_APP_URL} \
+    -PtimesheetsServerUrl=https://${TIMESHEETS_APP_URL}
+
+Wrap up
+
+    Local development with SCS (platform-services)
+    Dependency challenges (Spring, Spring Boot, Spring Cloud, Spring Cloud Services, Netflix OSS)
+    GoRouter vs container to container networking
+
+Learning Outcomes
+
+Now that you have completed the lab, you should be able to:
+
+    Explain how to introduce Spring Cloud to an application running on Cloud Foundry
+    Describe the pros and cons of using Service Discovery
+    Describe the pros and cons of using Client Side Load Balancing
+    Explain how to add Service Discovery to an application
+    Explain how to add Client Side Load Balancing to an application
+    Identify the differences between routing through the GoRouter and container to container networking
+
+Extra
+
+If you have additional time, try deploying your local Eureka server to Cloud Foundry and configure your apps to use it. When doing so, use a Jetty server rather than Tomcat in order to ensure Eureka runs correctly. What are the pain points here? If you still have time, try scaling the instances of your Eureka server and making each instance peer aware.
+
+
+
+
+Purpose
+
+We will use Hystrix to add a circuit breaker when fetching a project.
+
+The allocation-server, backlog-server, and timesheets-server all integrate with the registration-server. They use it to verify that a project is active before creating a dependent resource. If the registration-server is down then we cannot create any resources on the other servers.
+
+At the end of the lab, if a project takes too long to load or fails to be retrieved, our application will display a cached project.
+
+This allows our system to function smoothly even if there is a problem with our registration server.
+Learning Outcomes
+
+After completing the lab, you will be able to:
+
+    Describe the circuit breaker pattern and its pros and cons
+    Utilize a dependency to implement the circuit breaker pattern
+    Identify cases where the circuit breaker pattern cannot be used
+
+Discussion points
+
+    Circuit breaker basics (diagram)
+    Cascading failures in a distributed system.
+    Protection against latency.
+    Fail fast, quickly recover.
+    Gracefully degrade.
+    Monitor the health of a system.
+
+Create circuit breaker dashboard instance
+
+Create a Circuit Breaker Dashboard service instance and call it tracker-circuit-breaker-dashboard.
+
+Creation will take a few minutes and must finish before we bind the service. That is why we create the service here.
+Update client libraries
+
+We will start by enabling each of our client libraries to use a Hystrix fallback method.
+
+    Add the following dependency to the build.gradle in the allocations, backlog, and timesheets components:
+
+    compile "com.netflix.hystrix:hystrix-javanica:1.5.18"
+
+    This will provide us the @HystrixCommand annotation.
+
+    Annotate each getProject method with
+
+    @HystrixCommand(fallbackMethod = "getProjectFromCache")
+
+    Update the ProjectClient to store any fetched project in a local in-memory cache (using a ConcurrentMap should be sufficient).
+
+    Implement the getProjectFromCache function. It has to have the same method signature as getProject.
+
+Here is an example implementation if you would like some help:
+Show ProjectClient.java
+Enable circuit breaker
+
+We can now use a Spring Cloud Services (SCS) starter to enable circuit breaking in each application that is a client of the registration server, and to allow them to report circuit breaker status to a dashboard.
+
+    Add the following dependency to the dependencies section of the build.gradle file for each of allocations-server, backlog-server, and timesheets-server applications.
+
+    compile "io.pivotal.spring.cloud:spring-cloud-services-starter-circuit-breaker"
+
+    Add the @EnableCircuitBreaker annotation to the Spring Boot application classes in allocations-server, backlog-server, and timesheets-server.
+
+    Make it easier to test locally by updating each of the three apps' application.properties (in the main and test folders) with:
+
+    hystrix.command.default.execution.isolation.thread.timeoutInMilliseconds=5000
+
+    Configure each application to display Hystrix health on the /actuator/health endpoint. By default, Actuator will only show overall system health.
+
+    management.endpoint.health.show-details=always
+
+    This setting will allow the assignment submission to see the status of Hystrix. Using this setting in a production application may be a security hole. See the Spring Boot documentation for more details.
+
+You can find more documentation on Hystrix configuration on the official wiki.
+Test locally
+
+Follow the steps below to validate that the circuit breaker is working correctly.
+
+    Start all four servers and Eureka.
+
+    Create a user.
+
+    curl -i -XPOST -H"Content-Type: application/json" localhost:8083/registration -d'{"name": "Pete"}'
+
+    Find the account associated to the created user.
+
+    curl -i localhost:8083/accounts?ownerId=${USER_ID}
+
+    Create Project A, and Project B using the registration server.
+
+    curl -i -XPOST -H"Content-Type: application/json" localhost:8083/projects -d"{\"name\": \"Project A\", \"accountId\": \"${ACCOUNT_ID}\"}"
+    curl -i -XPOST -H"Content-Type: application/json" localhost:8083/projects -d"{\"name\": \"Project B\", \"accountId\": \"${ACCOUNT_ID}\"}"
+
+    Create an allocation using Project A's id.
+
+    curl -i -XPOST -H"Content-Type: application/json" localhost:8081/allocations/ -d"{\"projectId\": \"${PROJECT_A_ID}\", \"userId\": \"${USER_ID}\", \"firstDay\": \"2015-05-17\", \"lastDay\": \"2015-05-18\"}"
+
+    Stop the registration server.
+
+    Create an allocation using Project B's id. The call should fail because there is no cached result for Project B.
+
+    curl -i -XPOST -H"Content-Type: application/json" localhost:8081/allocations/ -d"{\"projectId\": \"${PROJECT_B_ID}\", \"userId\": \"${USER_ID}\", \"firstDay\": \"2015-05-17\", \"lastDay\": \"2015-05-18\"}"
+
+    Create an allocation using Project A's id. The call should succeed because there is a cached result for Project A.
+
+    curl -i -XPOST -H"Content-Type: application/json" localhost:8081/allocations/ -d"{\"projectId\": \"${PROJECT_A_ID}\", \"userId\": \"${USER_ID}\", \"firstDay\": \"2015-05-17\", \"lastDay\": \"2015-05-18\"}"
+
+    Start the registration server.
+
+    Create an allocation with Project B's id. The call should eventually succeed because the registration server is back up. It may take a bit for the circuit to recognize the registration server is back up.
+
+Deploy
+
+    Confirm that your circuit breaker dashboard instance creation is done.
+
+    Add the service bindings for the dashboard to the three manifest files manifest-allocations.yml, manifest-backlog.yml, and manifest-timesheets.yml.
+
+    services:
+     ...
+     - tracker-circuit-breaker-dashboard
+
+    Commit and push your code. Travis CI will deploy the applications to Cloud Foundry.
+
+    Verify that everything is working as expected by following the above set of curl commands against your PCF environment.
+
+    Take a look at the Circuit Breaker dashboard:
+
+    Go to the PCF console (Apps Manager) in your browser and log in with your CF CLI credentials.
+
+    Find your organization and space in the left navigation.
+
+    Click the Services tab, then select the Circuit Breaker service from the list.
+
+    Click the Manage link in the top right corner of the page.
+
+    The three applications (allocations, backlog, and timesheets) should appear once you send enough traffic through the system, so use your API testing tool of choice to generate plenty of traffic.
+
+Assignment
+
+Submit the following assignment:
+
+cd ~/workspace/assignment-submission
+./gradlew cloudNativeDeveloperDistributedSystemWithCircuitBreaker \
+    -PregistrationServerUrl=https://${REGISTRATION_APP_URL} \
+    -PbacklogServerUrl=https://${BACKLOG_APP_URL} \
+    -PallocationsServerUrl=https://${ALLOCATIONS_APP_URL} \
+    -PtimesheetsServerUrl=https://${TIMESHEETS_APP_URL}
+
+Wrap up
+
+    Dangers of no compiler checks for fallback methods (test them!)
+    Use cases where the circuit breaker pattern should not be used
+
+Learning Outcomes
+
+Now that you have completed the lab, you should be able to:
+
+    Describe the circuit breaker pattern and its pros and cons
+    Utilize a dependency to implement the circuit breaker pattern
+    Identify cases where the circuit breaker pattern cannot be used
+
+Extra
+
+If you have additional time, try using Redis to store cached projects rather than the in-memory data store.
+
+
+
+Purpose
+
+In this lab we are going to explore remote configuration of our microservices via a Spring Cloud Config Server. We will start with setting a simple configuration in a Git repository and integrating it in our applications.
+
+Next we will look at more of the features of the configuration server.
+Learning Outcomes
+
+After completing the lab, you will be able to:
+
+    Discuss the pros and cons of using a config server
+    Describe how to use config server with multiple environments
+    Describe how to set up config server to store application configuration
+
+Discussion points
+
+    Config server overview (diagram).
+    Keep configuration as simple as possible.
+    Use one repository per environment.
+
+Create a config repository
+
+We will store the common configuration for our applications in a configuration repository.
+
+    Create a new repository on GitHub called tracker-config. Make the repository public and do not initialize the repository.
+
+    Create a folder on your local machine to keep a local copy of this repository.
+
+    mkdir ~/workspace/tracker-config
+    cd ~/workspace/tracker-config
+    git init
+    git remote add origin https://github.com/${YOUR_GITHUB_USERNAME}/tracker-config.git
+
+    Create an application.properties file inside of the tracker-config directory with the following contents:
+
+    registration.server.endpoint=http://registration-server
+
+    This is a common configuration file that the config server provides to each of your applications.
+
+    Commit your changes in the tracker-config repository and push to GitHub.
+
+    git add application.properties
+    git commit -m"Initial commit"
+    git push -u origin master
+
+Create config service on Cloud Foundry
+
+Create an instance of the Config Server service. Run cf marketplace to get the config server service and plan name.
+
+cf create-service ${CONFIG_SERVER_SERVICE_NAME} ${PLAN_NAME} tracker-config-server \
+-c "{\"git\": {\"uri\": \"https://github.com/${YOUR_GITHUB_USERNAME}/tracker-config.git\", \"label\": \"master\"}}"
+
+Configure your applications
+
+    Add dependency in server.gradle.
+
+    compile "io.pivotal.spring.cloud:spring-cloud-services-starter-config-client"
+
+    In each of your applications, move spring.application.name from main/resources/application.properties to a new file called main/resources/bootstrap.properties.
+
+    The Spring Cloud Config Server can provide instance-specific configuration based on the application name. However, an application calls the Config Server before loading its application.properties file. Including the application name in the bootstrap.properties file ensures that the name is loaded before the call to the Config Server is made.
+
+    Remove the registration.server.endpoint property from each of your application.properties files (including in test) as it will be loaded from configuration.
+
+    For local development, add the following line to your server.gradle in the environment enclosure for the bootRun and test tasks:
+
+    "REGISTRATION_SERVER_ENDPOINT": "http://registration-server",
+
+    For integration tests, add the following line to the ApplicationServer class in the startWithDatabaseName method:
+
+    .put("REGISTRATION_SERVER_ENDPOINT", "http://registration-server")
+
+    Run the build to make sure that all the tests pass.
+
+    ./gradlew clean build
+
+    Run you applications locally and make a few test calls to make sure everything still works.
+
+    ./gradlew bootRun --parallel
+
+Deploy
+
+    Unset the environment variables that were moved to the externalized configuration from the application's environment on cloud foundry.
+
+    Set the MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE environment variable to * for each application. This will expose all of the actuator endpoints via the web so the assignment submission can check for specific information about your application. You may or may not want to do this in a production application depending on your requirements and security protocols.
+
+    Confirm that your config server instance has been successfully created.
+
+    Add a service binding to tracker-config-server to each of your manifests.
+
+    Commit, push, and wait for Travis CI to deploy.
+
+Finally, test that your configuration is correctly loaded by making a few calls to your applications.
+Assignment
+
+Submit the following assignment:
+
+./gradlew cloudNativeDeveloperDistributedSystemWithConfigServer \
+    -PuaaUrl=https://${UAA_ENDPOINT} \
+    -PclientId=${UAA_CLIENT_ID} \
+    -PclientSecret=${UAA_CLIENT_SECRET} \
+    -PregistrationServerUrl=https://${REGISTRATION_APP_URL} \
+    -PbacklogServerUrl=https://${BACKLOG_APP_URL} \
+    -PallocationsServerUrl=https://${ALLOCATIONS_APP_URL} \
+    -PtimesheetsServerUrl=https://${TIMESHEETS_APP_URL}
+
+Please delete your applications and services once your assignment passes (after doing the Extra exercises, should you decide to do them).
+Wrap up
+
+Pros and cons of using a config server
+Learning Outcomes
+
+Now that you have completed the lab, you should be able to:
+
+    Discuss the pros and cons of using a config server
+    Describe how to use config server with multiple environments
+    Describe how to set up config server to store application configuration
+
+Extra
+
+If you have additional time, add an endpoint that shows the 5 most recently created stories (with tests, of course). Next, make the number of stories that this endpoint returns configurable, and use the RefreshScope annotation to enable live reloading of this property. Deploy your application again and try changing your configuration without restarting your application.
+
+
